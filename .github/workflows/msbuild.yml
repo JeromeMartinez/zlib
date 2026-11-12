@@ -2,22 +2,52 @@ name: MSBuild
 
 on: [push, pull_request]
 
+# A new push cancels the run of the previous one on the same branch or pull request, except on master
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+# Only the platforms which do not provide zlib, with the Visual Studio projects of this fork
+# (the code, CMake and configure are checked by zlib upstream)
+# Each platform with Visual Studio 2022, x64 only with Visual Studio 2026
+# Runners chosen by Visual Studio version, windows-latest moves to new versions
 jobs:
+
   Windows:
-    runs-on: windows-latest
     strategy:
       matrix:
+        vs: [ 2022 ]
         architecture: [ Win32, x64, ARM64 ]
-        configuration: [ Release, ReleaseWithoutAsm ]
+        runner: [ windows-2022 ]
+        directory: [ vc17 ]
+        solution: [ zlibvc.sln ]
+        include:
+          - vs: 2026
+            architecture: x64
+            runner: windows-2025-vs2026
+            directory: vc18
+            solution: zlibvc.slnx
       fail-fast: false
+    name: Windows (VS ${{ matrix.vs }}, ${{ matrix.architecture }})
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout zlib
         uses: actions/checkout@v6
-        with:
-          path: zlib
       - name: Add msbuild to PATH
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
         with:
           msbuild-architecture: x64
       - name: Build
-        run: msbuild -p:Configuration=${{ matrix.configuration }} -p:Platform=${{ matrix.architecture }} ${{ github.workspace }}\zlib\contrib\vstudio\vc17\zlibvc.sln -warnaserror -clp:ForceConsoleColor
+        run: MSBuild.exe -p:Configuration=Release -p:Platform=${{ matrix.architecture }} contrib/vstudio/${{ matrix.directory }}/${{ matrix.solution }} -verbosity:quiet -warnaserror -m
+      - name: Check
+        if: matrix.architecture == 'Win32' || matrix.architecture == 'x64'
+        shell: bash
+        working-directory: contrib/vstudio/${{ matrix.directory }}/${{ matrix.architecture == 'Win32' && 'x86' || 'x64' }}
+        run: |
+          # Compression then decompression of a file, with the static library then with the DLL
+          export PATH="${PWD}/ZlibDllRelease:${PATH}"
+          for Program in TestZlibRelease/testzlib.exe TestZlibDllRelease/testzlibdll.exe ; do
+            Output=$(${Program} ../../../../zlib.h)
+            echo "${Output}"
+            [[ "${Output}" == *"compare ok"* ]] || exit 1
+          done
